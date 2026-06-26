@@ -2,8 +2,23 @@ const express = require('express')
 const router = express.Router()
 const supabase = require('../db/supabase')
 const { verificarToken, soloAdmin } = require('../middleware/authMiddleware')
+const twilio = require('twilio')
 
 router.use(verificarToken, soloAdmin)
+
+const enviarWhatsApp = async (celular, mensaje) => {
+  try {
+    const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+    await client.messages.create({
+      from: process.env.TWILIO_WHATSAPP_NUMBER,
+      to: `whatsapp:+57${celular}`,
+      body: mensaje
+    })
+    console.log(`✅ WhatsApp enviado a ${celular}`)
+  } catch (err) {
+    console.error('Error enviando WhatsApp:', err.message)
+  }
+}
 
 // STATS
 router.get('/stats', async (req, res) => {
@@ -22,10 +37,7 @@ router.get('/stats', async (req, res) => {
 // HISTORIAL DE SORTEOS
 router.get('/sorteos/historial', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('sorteos')
-      .select('*')
-      .order('created_at', { ascending: false })
+    const { data, error } = await supabase.from('sorteos').select('*').order('created_at', { ascending: false })
     if (error) return res.status(500).json({ error: error.message })
     res.json(data || [])
   } catch (err) {
@@ -36,11 +48,7 @@ router.get('/sorteos/historial', async (req, res) => {
 // GANADORES DE UN SORTEO
 router.get('/sorteos/:id/ganadores', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('ganadores')
-      .select('*, usuarios(nombre, email)')
-      .eq('sorteo_id', req.params.id)
-      .order('premio', { ascending: false })
+    const { data, error } = await supabase.from('ganadores').select('*, usuarios(nombre, email)').eq('sorteo_id', req.params.id).order('premio', { ascending: false })
     if (error) return res.status(500).json({ error: error.message })
     res.json(data || [])
   } catch (err) {
@@ -51,11 +59,7 @@ router.get('/sorteos/:id/ganadores', async (req, res) => {
 // RECARGAS pendientes
 router.get('/recargas', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('recargas')
-      .select('*, usuario:usuario_id(nombre, email, celular)')
-      .eq('estado', 'pendiente')
-      .order('created_at', { ascending: false })
+    const { data, error } = await supabase.from('recargas').select('*, usuario:usuario_id(nombre, email, celular)').eq('estado', 'pendiente').order('created_at', { ascending: false })
     if (error) return res.status(500).json({ error: error.message })
     res.json(data || [])
   } catch (err) {
@@ -70,9 +74,14 @@ router.post('/recargas/:id/aprobar', async (req, res) => {
     const { data: recarga } = await supabase.from('recargas').select('*').eq('id', id).single()
     if (!recarga) return res.status(404).json({ error: 'Recarga no encontrada' })
     await supabase.from('recargas').update({ estado: 'aprobada', aprobado_por: req.usuario.id, aprobado_at: new Date().toISOString() }).eq('id', id)
-    const { data: usuario } = await supabase.from('usuarios').select('saldo').eq('id', recarga.usuario_id).single()
+    const { data: usuario } = await supabase.from('usuarios').select('saldo, nombre, celular').eq('id', recarga.usuario_id).single()
     await supabase.from('usuarios').update({ saldo: (usuario.saldo || 0) + recarga.monto }).eq('id', recarga.usuario_id)
     await supabase.from('movimientos').insert([{ usuario_id: recarga.usuario_id, tipo: 'recarga', monto: recarga.monto, descripcion: 'Recarga aprobada por admin via ' + recarga.metodo, referencia_id: String(id) }])
+
+    // Notificar por WhatsApp
+    await enviarWhatsApp(usuario.celular,
+      `🎟️ *GANA GANA O GANA*\n\n¡Hola ${usuario.nombre}! ✅\n\nTu recarga de *$${recarga.monto.toLocaleString('es-CO')} COP* ha sido aprobada y ya está disponible en tu billetera.\n\n¡Compra tu boleta y participa! 🍀`
+    )
     res.json({ success: true })
   } catch (err) {
     res.status(500).json({ error: 'Error al aprobar recarga' })
@@ -99,21 +108,21 @@ router.post('/sorteo/ganadores', async (req, res) => {
     const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'activo').single()
     if (!sorteo) return res.status(404).json({ error: 'No hay sorteo activo' })
 
-    const { data: mayor } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email)').eq('sorteo_id', sorteo.id).eq('numero', numero)
-    if (mayor && mayor.length > 0) mayor.forEach(m => ganadores.push({ numero, categoria: 'Premio Mayor', premio: 2000000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, usuario_id: m.usuarios?.id }))
+    const { data: mayor } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', numero)
+    if (mayor && mayor.length > 0) mayor.forEach(m => ganadores.push({ numero, categoria: 'Premio Mayor', premio: 2000000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id }))
 
     for (let x = 0; x <= 9; x++) {
       const n = d[0] + d[1] + d[2] + x
       if (n === numero) continue
-      const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email)').eq('sorteo_id', sorteo.id).eq('numero', n)
-      if (data && data.length > 0) data.forEach(m => ganadores.push({ numero: n, categoria: '3 Primeras', premio: 80000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, usuario_id: m.usuarios?.id }))
+      const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', n)
+      if (data && data.length > 0) data.forEach(m => ganadores.push({ numero: n, categoria: '3 Primeras', premio: 80000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id }))
     }
 
     for (let x = 0; x <= 9; x++) {
       const n = x + d[1] + d[2] + d[3]
       if (n === numero) continue
-      const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email)').eq('sorteo_id', sorteo.id).eq('numero', n)
-      if (data && data.length > 0) data.forEach(m => ganadores.push({ numero: n, categoria: '3 Últimas', premio: 80000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, usuario_id: m.usuarios?.id }))
+      const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', n)
+      if (data && data.length > 0) data.forEach(m => ganadores.push({ numero: n, categoria: '3 Últimas', premio: 80000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id }))
     }
 
     const excluidos = new Set([numero])
@@ -124,8 +133,8 @@ router.post('/sorteo/ganadores', async (req, res) => {
       for (let b = 0; b <= 9; b++) {
         const n = String(a) + String(b) + d[2] + d[3]
         if (excluidos.has(n)) continue
-        const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email)').eq('sorteo_id', sorteo.id).eq('numero', n)
-        if (data && data.length > 0) data.forEach(m => ganadores.push({ numero: n, categoria: '2 Últimas', premio: 5000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, usuario_id: m.usuarios?.id }))
+        const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', n)
+        if (data && data.length > 0) data.forEach(m => ganadores.push({ numero: n, categoria: '2 Últimas', premio: 5000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id }))
       }
     }
 
@@ -135,24 +144,33 @@ router.post('/sorteo/ganadores', async (req, res) => {
   }
 })
 
-// PAGAR PREMIO
+// PAGAR PREMIO + NOTIFICAR POR WHATSAPP
 router.post('/sorteo/pagar-premio', async (req, res) => {
-  const { usuario_id, premio, categoria, numero } = req.body
+  const { usuario_id, premio, categoria, numero, celular } = req.body
   if (!usuario_id || !premio || !categoria) return res.status(400).json({ error: 'Datos incompletos' })
   try {
     const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'activo').single()
-    const { data: usuario } = await supabase.from('usuarios').select('saldo, nombre').eq('id', usuario_id).single()
+    const { data: usuario } = await supabase.from('usuarios').select('saldo, nombre, celular').eq('id', usuario_id).single()
     if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado' })
 
     await supabase.from('usuarios').update({ saldo: (usuario.saldo || 0) + premio }).eq('id', usuario_id)
     await supabase.from('movimientos').insert([{ usuario_id, tipo: 'premio', monto: premio, descripcion: `Premio ${categoria} - número ${numero}`, referencia_id: numero }])
 
-    // Registrar en tabla ganadores
     if (sorteo) {
       await supabase.from('ganadores').insert([{ sorteo_id: sorteo.id, usuario_id, numero, categoria, premio, boleta_id: 1 }])
-      // Actualizar premios pagados del sorteo
       await supabase.from('sorteos').update({ premios_pagados: (sorteo.premios_pagados || 0) + premio }).eq('id', sorteo.id)
     }
+
+    // Mensaje según categoría
+    const mensajes = {
+      'Premio Mayor': `🏆 *¡GANASTE EL PREMIO MAYOR!* 🏆\n\n¡Felicitaciones ${usuario.nombre}! 🎉\n\nTu número *${numero}* ganó el *Premio Mayor* del sorteo.\n\n💰 *$${premio.toLocaleString('es-CO')} COP* han sido acreditados a tu billetera en GANA GANA O GANA.\n\n¡Muchas gracias por participar! 🍀`,
+      '3 Primeras': `🥈 *¡GANASTE UN PREMIO!* 🥈\n\n¡Felicitaciones ${usuario.nombre}! 🎉\n\nTu número *${numero}* ganó el premio de *3 primeras cifras*.\n\n💰 *$${premio.toLocaleString('es-CO')} COP* han sido acreditados a tu billetera.\n\n¡Sigue participando! 🍀`,
+      '3 Últimas': `🥉 *¡GANASTE UN PREMIO!* 🥉\n\n¡Felicitaciones ${usuario.nombre}! 🎉\n\nTu número *${numero}* ganó el premio de *3 últimas cifras*.\n\n💰 *$${premio.toLocaleString('es-CO')} COP* han sido acreditados a tu billetera.\n\n¡Sigue participando! 🍀`,
+      '2 Últimas': `🎁 *¡GANASTE UNA BOLETA GRATIS!* 🎁\n\n¡Felicitaciones ${usuario.nombre}! 🎉\n\nTu número *${numero}* coincidió con las *2 últimas cifras*.\n\n¡Tu boleta gratis ha sido acreditada a tu billetera! 🍀`,
+    }
+
+    const celularFinal = celular || usuario.celular
+    await enviarWhatsApp(celularFinal, mensajes[categoria] || `🎉 ¡Ganaste $${premio.toLocaleString('es-CO')} COP! Ya está en tu billetera.`)
 
     res.json({ success: true })
   } catch (err) {
@@ -172,25 +190,13 @@ router.post('/sorteo/cerrar', async (req, res) => {
     const premios = sorteo.premios_pagados || 0
     const utilidad = recaudo - premios
 
-    // Cerrar sorteo actual
-    await supabase.from('sorteos').update({
-      estado: 'jugado',
-      numero_ganador,
-      jugado_at: new Date().toISOString(),
-      saldo_acumulado: utilidad
-    }).eq('id', sorteo.id)
+    await supabase.from('sorteos').update({ estado: 'jugado', numero_ganador, jugado_at: new Date().toISOString(), saldo_acumulado: utilidad }).eq('id', sorteo.id)
 
-    // Obtener saldo acumulado total de sorteos anteriores
     const { data: anteriores } = await supabase.from('sorteos').select('saldo_acumulado').eq('estado', 'jugado')
     const saldoTotal = anteriores?.reduce((acc, s) => acc + (s.saldo_acumulado || 0), 0) || 0
 
-    // Crear nuevo sorteo
     const nuevoNumero = sorteo.id + 1
-    const { data: nuevoSorteo } = await supabase
-      .from('sorteos')
-      .insert([{ nombre: `Sorteo #${String(nuevoNumero).padStart(4,'0')}`, estado: 'activo', total_boletas: 0, recaudo_actual: 0, premios_pagados: 0 }])
-      .select()
-      .single()
+    const { data: nuevoSorteo } = await supabase.from('sorteos').insert([{ nombre: `Sorteo #${String(nuevoNumero).padStart(4,'0')}`, estado: 'activo', total_boletas: 0, recaudo_actual: 0, premios_pagados: 0 }]).select().single()
 
     res.json({ success: true, utilidad, saldo_total: saldoTotal, nuevo_sorteo: nuevoSorteo })
   } catch (err) {
@@ -242,10 +248,14 @@ router.post('/usuarios/:id/recargar', async (req, res) => {
   const { monto, descripcion } = req.body
   if (!monto || monto <= 0) return res.status(400).json({ error: 'Monto inválido' })
   try {
-    const { data: usuario } = await supabase.from('usuarios').select('saldo').eq('id', req.params.id).single()
+    const { data: usuario } = await supabase.from('usuarios').select('saldo, nombre, celular').eq('id', req.params.id).single()
     if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado' })
     await supabase.from('usuarios').update({ saldo: (usuario.saldo || 0) + monto }).eq('id', req.params.id)
     await supabase.from('movimientos').insert([{ usuario_id: req.params.id, tipo: 'recarga_admin', monto, descripcion: descripcion || 'Recarga manual por administrador' }])
+
+    await enviarWhatsApp(usuario.celular,
+      `🎟️ *GANA GANA O GANA*\n\n¡Hola ${usuario.nombre}! ✅\n\nEl administrador ha recargado *$${monto.toLocaleString('es-CO')} COP* a tu billetera.\n\n¡Ya puedes comprar tu boleta! 🍀`
+    )
     res.json({ success: true })
   } catch (err) {
     res.status(500).json({ error: err.message })
