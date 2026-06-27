@@ -23,4 +23,5 @@ app.use('/api/retiros', retirosRoutes)
 app.get('/', (req, res) => res.json({ status: 'GANA GANA O GANA API funcionando ✅' }))
 
 const PORT = process.env.PORT || 4000
+app.get('/health', (req, res) => res.status(200).json({ status: 'ok' }))
 app.listen(PORT, () => console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`))
