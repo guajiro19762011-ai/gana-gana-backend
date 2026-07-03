@@ -274,3 +274,38 @@ router.get('/usuarios/:id/boletas', async (req, res) => {
 })
 
 module.exports = router
+
+// SOLICITUDES DE REVENDEDOR
+router.get('/revendedores/solicitudes', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('usuarios')
+      .select('id, nombre, email, celular, codigo_referido, saldo, created_at')
+      .eq('solicitud_revendedor', 'pendiente')
+      .order('created_at', { ascending: false })
+    if (error) return res.status(500).json({ error: error.message })
+    res.json(data || [])
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// APROBAR revendedor
+router.post('/revendedores/:id/aprobar', async (req, res) => {
+  try {
+    await supabase.from('usuarios').update({ rol: 'revendedor', solicitud_revendedor: 'aprobada' }).eq('id', req.params.id)
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// RECHAZAR revendedor
+router.post('/revendedores/:id/rechazar', async (req, res) => {
+  try {
+    await supabase.from('usuarios').update({ solicitud_revendedor: 'rechazada' }).eq('id', req.params.id)
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})

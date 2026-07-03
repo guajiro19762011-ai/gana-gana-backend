@@ -10,7 +10,7 @@ router.get('/', async (req, res) => {
   try {
     const { data: usuario } = await supabase
       .from('usuarios')
-      .select('saldo, nombre, codigo_referido')
+      .select('saldo, nombre, codigo_referido, rol, solicitud_revendedor')
       .eq('id', req.usuario.id)
       .single()
 
@@ -21,7 +21,14 @@ router.get('/', async (req, res) => {
       .order('created_at', { ascending: false })
       .limit(20)
 
-    res.json({ saldo: usuario.saldo, nombre: usuario.nombre, codigo_referido: usuario.codigo_referido, movimientos: movimientos || [] })
+    res.json({
+      saldo: usuario.saldo,
+      nombre: usuario.nombre,
+      codigo_referido: usuario.codigo_referido,
+      rol: usuario.rol,
+      solicitud_revendedor: usuario.solicitud_revendedor,
+      movimientos: movimientos || []
+    })
   } catch (err) {
     res.status(500).json({ error: 'Error al obtener billetera' })
   }
