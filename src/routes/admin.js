@@ -309,3 +309,40 @@ router.post('/revendedores/:id/rechazar', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
+
+// REINICIAR SISTEMA (borrar todo excepto admin)
+router.post('/reiniciar', async (req, res) => {
+  const { confirmacion } = req.body
+  if (confirmacion !== 'REINICIAR') return res.status(400).json({ error: 'Debes confirmar escribiendo REINICIAR' })
+  try {
+    // Borrar en orden por dependencias
+    await supabase.from('ganadores').delete().neq('id', 0)
+    await supabase.from('movimientos').delete().neq('id', 0)
+    await supabase.from('numeros_tomados').delete().neq('id', 0)
+    await supabase.from('boletas').delete().neq('id', 0)
+    await supabase.from('recargas').delete().neq('id', 0)
+    await supabase.from('retiros').delete().neq('id', 0)
+    await supabase.from('mensajes').delete().neq('id', 0)
+    await supabase.from('anuncios').delete().neq('id', 0)
+    await supabase.from('sorteos').delete().neq('id', 0)
+
+    // Borrar todos los usuarios excepto admin
+    await supabase.from('usuarios').delete().neq('rol', 'admin')
+
+    // Resetear saldo del admin a 0
+    await supabase.from('usuarios').update({ saldo: 0 }).eq('rol', 'admin')
+
+    // Crear nuevo sorteo limpio
+    await supabase.from('sorteos').insert([{
+      nombre: 'Sorteo #0001',
+      estado: 'activo',
+      total_boletas: 0,
+      recaudo_actual: 0,
+      premios_pagados: 0
+    }])
+
+    res.json({ success: true, mensaje: 'Sistema reiniciado exitosamente' })
+  } catch (err) {
+    res.status(500).json({ error: 'Error al reiniciar: ' + err.message })
+  }
+})

@@ -8,6 +8,8 @@ const sorteosRoutes = require('./routes/sorteos')
 const billeteraRoutes = require('./routes/billetera')
 const anunciosRoutes = require('./routes/anuncios')
 const retirosRoutes = require('./routes/retiros')
+const mensajesRoutes = require('./routes/mensajes')
+const paginaRoutes = require('./routes/pagina')
 
 const app = express()
 app.use(cors())
@@ -19,9 +21,11 @@ app.use('/api/sorteos', sorteosRoutes)
 app.use('/api/billetera', billeteraRoutes)
 app.use('/api/anuncios', anunciosRoutes)
 app.use('/api/retiros', retirosRoutes)
+app.use('/api/mensajes', mensajesRoutes)
+app.use('/api/pagina', paginaRoutes)
 
+app.get('/health', (req, res) => res.status(200).json({ status: 'ok' }))
 app.get('/', (req, res) => res.json({ status: 'GANA GANA O GANA API funcionando ✅' }))
 
 const PORT = process.env.PORT || 4000
-app.get('/health', (req, res) => res.status(200).json({ status: 'ok' }))
 app.listen(PORT, () => console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`))
