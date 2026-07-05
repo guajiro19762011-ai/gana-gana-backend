@@ -346,3 +346,48 @@ router.post('/reiniciar', async (req, res) => {
     res.status(500).json({ error: 'Error al reiniciar: ' + err.message })
   }
 })
+
+// CAMBIAR CREDENCIALES DEL ADMIN
+router.put('/credenciales', async (req, res) => {
+  const { email, password_actual, password_nuevo, confirmar } = req.body
+  try {
+    const bcrypt = require('bcryptjs')
+
+    // Obtener admin actual
+    const { data: admin } = await supabase
+      .from('usuarios')
+      .select('*')
+      .eq('id', req.usuario.id)
+      .single()
+
+    if (!admin) return res.status(404).json({ error: 'Admin no encontrado' })
+
+    // Verificar contraseña actual
+    const valido = await bcrypt.compare(password_actual, admin.password_hash)
+    if (!valido) return res.status(400).json({ error: 'La contraseña actual es incorrecta' })
+
+    const updates = {}
+
+    // Actualizar email si cambió
+    if (email && email !== admin.email) {
+      const { data: existe } = await supabase.from('usuarios').select('id').eq('email', email).single()
+      if (existe) return res.status(400).json({ error: 'Ese correo ya está en uso' })
+      updates.email = email
+    }
+
+    // Actualizar contraseña si se proporcionó
+    if (password_nuevo) {
+      if (password_nuevo.length < 6) return res.status(400).json({ error: 'La nueva contraseña debe tener mínimo 6 caracteres' })
+      if (password_nuevo !== confirmar) return res.status(400).json({ error: 'Las contraseñas no coinciden' })
+      updates.password_hash = await bcrypt.hash(password_nuevo, 10)
+    }
+
+    if (Object.keys(updates).length === 0)
+      return res.status(400).json({ error: 'No hay cambios que guardar' })
+
+    await supabase.from('usuarios').update(updates).eq('id', req.usuario.id)
+    res.json({ success: true, mensaje: 'Credenciales actualizadas correctamente' })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
