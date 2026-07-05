@@ -80,5 +80,24 @@ router.get('/usuario/:id', verificarToken, soloAdmin, async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
+// ELIMINAR conversacion de un usuario (admin)
+router.delete('/usuario/:id', verificarToken, soloAdmin, async (req, res) => {
+  try {
+    await supabase.from('mensajes').delete().eq('usuario_id', req.params.id)
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// ELIMINAR mensaje individual (admin)
+router.delete('/:id', verificarToken, soloAdmin, async (req, res) => {
+  try {
+    await supabase.from('mensajes').delete().eq('id', req.params.id)
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
 
 module.exports = router
