@@ -2,125 +2,169 @@ const express = require('express')
 const router = express.Router()
 const supabase = require('../db/supabase')
 const { verificarToken } = require('../middleware/authMiddleware')
+const generarBoletas = require('../utils/generarBoletas')
 
 router.use(verificarToken)
 
-// GET sorteo activo + numeros tomados
+// GET sorteo activo
 router.get('/activo', async (req, res) => {
   try {
     const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'activo').single()
     if (!sorteo) return res.status(404).json({ error: 'No hay sorteo activo' })
-    const { data: numeros } = await supabase.from('numeros_tomados').select('numero, usuario_id').eq('sorteo_id', sorteo.id)
-    res.json({ sorteo, numeros: numeros || [] })
+    const { data: tomados } = await supabase
+      .from('boletas_pregeneradas')
+      .select('numeros, usuario_id')
+      .eq('sorteo_id', sorteo.id)
+      .eq('disponible', false)
+    res.json({ sorteo, numeros: (tomados || []).flatMap(b => b.numeros.map(n => ({ numero: n, usuario_id: b.usuario_id }))) })
   } catch (err) {
     res.status(500).json({ error: 'Error al obtener sorteo' })
   }
 })
 
-// COMPRAR boleta (cliente normal)
-router.post('/comprar', async (req, res) => {
-  const { numeros } = req.body
-  const usuario_id = req.usuario.id
-
-  if (!numeros || numeros.length !== 10)
-    return res.status(400).json({ error: 'Debes seleccionar exactamente 10 números' })
-
-  for (const n of numeros) {
-    if (!/^\d{4}$/.test(n)) return res.status(400).json({ error: `Número inválido: ${n}` })
-  }
-
+// BUSCAR boleta por número
+router.get('/buscar/:numero', async (req, res) => {
+  const { numero } = req.params
+  if (!/^\d{4}$/.test(numero)) return res.status(400).json({ error: 'Número inválido' })
   try {
-    const { data: usuario } = await supabase.from('usuarios').select('saldo, rol').eq('id', usuario_id).single()
-    if (!usuario || usuario.saldo < 5000) return res.status(400).json({ error: 'Saldo insuficiente. Recarga tu billetera.' })
-
     const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'activo').single()
     if (!sorteo) return res.status(404).json({ error: 'No hay sorteo activo' })
+    const { data: boletas } = await supabase
+      .from('boletas_pregeneradas')
+      .select('*')
+      .eq('sorteo_id', sorteo.id)
+      .contains('numeros', [numero])
+    if (!boletas || boletas.length === 0) return res.status(404).json({ error: 'Número no encontrado' })
+    const boleta = boletas[0]
+    if (!boleta.disponible) return res.status(400).json({ vendida: true, error: 'Esta boleta ya fue vendida. Intenta con otro número.' })
+    res.json({ boleta, disponible: true })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
 
-    const { data: tomados } = await supabase.from('numeros_tomados').select('numero').eq('sorteo_id', sorteo.id).in('numero', numeros)
-    if (tomados && tomados.length > 0) return res.status(400).json({ error: `Los números ${tomados.map(t => t.numero).join(', ')} ya están tomados` })
+// BOLETA ALEATORIA
+router.get('/aleatoria', async (req, res) => {
+  try {
+    const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'activo').single()
+    if (!sorteo) return res.status(404).json({ error: 'No hay sorteo activo' })
+    const { data: boletas } = await supabase
+      .from('boletas_pregeneradas')
+      .select('*')
+      .eq('sorteo_id', sorteo.id)
+      .eq('disponible', true)
+      .limit(50)
+    if (!boletas || boletas.length === 0) return res.status(404).json({ error: 'No hay boletas disponibles' })
+    const boleta = boletas[Math.floor(Math.random() * boletas.length)]
+    res.json({ boleta, disponible: true })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
 
-    const { data: boleta, error: boletaError } = await supabase.from('boletas').insert([{ usuario_id, sorteo_id: sorteo.id, numeros, valor: 5000 }]).select().single()
-    if (boletaError) return res.status(500).json({ error: 'Error al crear boleta' })
+// COMPRAR boleta
+router.post('/comprar', async (req, res) => {
+  const { boleta_id, nombre_cliente, celular_cliente } = req.body
+  const usuario_id = req.usuario.id
+  if (!boleta_id) return res.status(400).json({ error: 'Selecciona una boleta' })
+  try {
+    const { data: usuario } = await supabase.from('usuarios').select('saldo, rol').eq('id', usuario_id).single()
+    if (!usuario || usuario.saldo < 5000) return res.status(400).json({ error: 'Saldo insuficiente' })
+    const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'activo').single()
+    if (!sorteo) return res.status(404).json({ error: 'No hay sorteo activo' })
+    const { data: boleta } = await supabase.from('boletas_pregeneradas').select('*').eq('id', boleta_id).single()
+    if (!boleta || !boleta.disponible) return res.status(400).json({ error: 'Esta boleta ya fue vendida' })
 
-    const numerosInsert = numeros.map(n => ({ sorteo_id: sorteo.id, numero: n, usuario_id, boleta_id: boleta.id }))
+    await supabase.from('boletas_pregeneradas').update({
+      disponible: false, usuario_id,
+      nombre_cliente: nombre_cliente || null,
+      celular_cliente: celular_cliente || null,
+      vendida_at: new Date().toISOString()
+    }).eq('id', boleta_id)
+
+    const { data: boletaReg } = await supabase.from('boletas').insert([{
+      usuario_id, sorteo_id: sorteo.id, numeros: boleta.numeros, valor: 5000,
+      nombre_cliente: nombre_cliente || null, celular_cliente: celular_cliente || null
+    }]).select().single()
+
+    const numerosInsert = boleta.numeros.map(n => ({ sorteo_id: sorteo.id, numero: n, usuario_id, boleta_id: boletaReg?.id }))
     await supabase.from('numeros_tomados').insert(numerosInsert)
 
-    // Bono según rol: revendedor $1000, cliente normal $500
     const bono = usuario.rol === 'revendedor' ? 1000 : 500
     const nuevoSaldo = (usuario.saldo - 5000) + bono
     await supabase.from('usuarios').update({ saldo: nuevoSaldo }).eq('id', usuario_id)
 
     await supabase.from('movimientos').insert([
-      { usuario_id, tipo: 'compra_boleta', monto: -5000, descripcion: 'Compra de boleta sorteo #' + sorteo.id, referencia_id: String(boleta.id) },
-      { usuario_id, tipo: 'bono_compra', monto: bono, descripcion: `Bono por compra de boleta #${boleta.id}`, referencia_id: String(boleta.id) }
+      { usuario_id, tipo: 'compra_boleta', monto: -5000, descripcion: `Compra boleta #${boleta.numero_boleta}` },
+      { usuario_id, tipo: 'bono_compra', monto: bono, descripcion: `Bono por compra boleta #${boleta.numero_boleta}` }
     ])
 
     await supabase.from('sorteos').update({ total_boletas: sorteo.total_boletas + 1 }).eq('id', sorteo.id)
     if (sorteo.total_boletas + 1 >= 1000) await supabase.from('sorteos').update({ estado: 'completo' }).eq('id', sorteo.id)
 
-    res.json({ success: true, boleta, saldo_nuevo: nuevoSaldo })
+    res.json({ success: true, boleta: { ...boleta, id: boletaReg?.id, sorteos: sorteo }, saldo_nuevo: nuevoSaldo })
   } catch (err) {
-    res.status(500).json({ error: 'Error al procesar la compra' })
+    res.status(500).json({ error: err.message })
   }
 })
 
-// VENDER boleta como revendedor (a cliente final)
+// VENDER boleta (revendedor)
 router.post('/vender', async (req, res) => {
-  const { numeros, nombre_cliente, celular_cliente } = req.body
+  const { boleta_id, nombre_cliente, celular_cliente } = req.body
   const usuario_id = req.usuario.id
-
-  if (!numeros || numeros.length !== 10) return res.status(400).json({ error: 'Debes seleccionar exactamente 10 números' })
-  if (!nombre_cliente || !celular_cliente) return res.status(400).json({ error: 'Ingresa el nombre y celular del cliente' })
-
+  if (!boleta_id) return res.status(400).json({ error: 'Selecciona una boleta' })
+  if (!nombre_cliente || !celular_cliente) return res.status(400).json({ error: 'Ingresa nombre y celular del cliente' })
   try {
     const { data: usuario } = await supabase.from('usuarios').select('saldo, rol, nombre').eq('id', usuario_id).single()
     if (usuario.rol !== 'revendedor') return res.status(403).json({ error: 'No tienes permisos de revendedor' })
-    if (!usuario || usuario.saldo < 5000) return res.status(400).json({ error: 'Saldo insuficiente. Recarga tu billetera.' })
-
+    if (!usuario || usuario.saldo < 5000) return res.status(400).json({ error: 'Saldo insuficiente' })
     const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'activo').single()
     if (!sorteo) return res.status(404).json({ error: 'No hay sorteo activo' })
+    const { data: boleta } = await supabase.from('boletas_pregeneradas').select('*').eq('id', boleta_id).single()
+    if (!boleta || !boleta.disponible) return res.status(400).json({ error: 'Esta boleta ya fue vendida' })
 
-    const { data: tomados } = await supabase.from('numeros_tomados').select('numero').eq('sorteo_id', sorteo.id).in('numero', numeros)
-    if (tomados && tomados.length > 0) return res.status(400).json({ error: `Los números ${tomados.map(t => t.numero).join(', ')} ya están tomados` })
+    await supabase.from('boletas_pregeneradas').update({
+      disponible: false, usuario_id, nombre_cliente, celular_cliente,
+      vendida_at: new Date().toISOString()
+    }).eq('id', boleta_id)
 
-    // Crear boleta con datos del cliente final
-    const { data: boleta, error: boletaError } = await supabase
-      .from('boletas')
-      .insert([{ usuario_id, sorteo_id: sorteo.id, numeros, valor: 5000, nombre_cliente, celular_cliente }])
-      .select()
-      .single()
-    if (boletaError) return res.status(500).json({ error: 'Error al crear boleta' })
+    const { data: boletaReg } = await supabase.from('boletas').insert([{
+      usuario_id, sorteo_id: sorteo.id, numeros: boleta.numeros, valor: 5000,
+      nombre_cliente, celular_cliente
+    }]).select().single()
 
-    const numerosInsert = numeros.map(n => ({ sorteo_id: sorteo.id, numero: n, usuario_id, boleta_id: boleta.id }))
+    const numerosInsert = boleta.numeros.map(n => ({ sorteo_id: sorteo.id, numero: n, usuario_id, boleta_id: boletaReg?.id }))
     await supabase.from('numeros_tomados').insert(numerosInsert)
 
-    // Bono revendedor $1000
     const nuevoSaldo = (usuario.saldo - 5000) + 1000
     await supabase.from('usuarios').update({ saldo: nuevoSaldo }).eq('id', usuario_id)
 
     await supabase.from('movimientos').insert([
-      { usuario_id, tipo: 'venta_boleta', monto: -5000, descripcion: `Venta de boleta a ${nombre_cliente}`, referencia_id: String(boleta.id) },
-      { usuario_id, tipo: 'bono_venta', monto: 1000, descripcion: `Bono por venta de boleta #${boleta.id}`, referencia_id: String(boleta.id) }
+      { usuario_id, tipo: 'venta_boleta', monto: -5000, descripcion: `Venta boleta #${boleta.numero_boleta} a ${nombre_cliente}` },
+      { usuario_id, tipo: 'bono_venta', monto: 1000, descripcion: `Bono venta boleta #${boleta.numero_boleta}` }
     ])
 
     await supabase.from('sorteos').update({ total_boletas: sorteo.total_boletas + 1 }).eq('id', sorteo.id)
     if (sorteo.total_boletas + 1 >= 1000) await supabase.from('sorteos').update({ estado: 'completo' }).eq('id', sorteo.id)
 
-    res.json({ success: true, boleta, saldo_nuevo: nuevoSaldo })
+    res.json({
+      success: true,
+      boleta: { ...boleta, id: boletaReg?.id, nombre_cliente, celular_cliente, nombre_vendedor: usuario.nombre, sorteos: sorteo },
+      saldo_nuevo: nuevoSaldo
+    })
   } catch (err) {
-    res.status(500).json({ error: 'Error al procesar la venta' })
+    res.status(500).json({ error: err.message })
   }
 })
 
-// SOLICITAR ser revendedor
+// SOLICITAR revendedor
 router.post('/solicitar-revendedor', async (req, res) => {
   try {
     const { data: usuario } = await supabase.from('usuarios').select('rol, solicitud_revendedor').eq('id', req.usuario.id).single()
     if (usuario.rol === 'revendedor') return res.status(400).json({ error: 'Ya eres revendedor' })
     if (usuario.solicitud_revendedor === 'pendiente') return res.status(400).json({ error: 'Ya tienes una solicitud pendiente' })
-
     await supabase.from('usuarios').update({ solicitud_revendedor: 'pendiente' }).eq('id', req.usuario.id)
-    res.json({ success: true, mensaje: 'Solicitud enviada. El admin la revisará pronto.' })
+    res.json({ success: true, mensaje: 'Solicitud enviada.' })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -130,14 +174,14 @@ router.post('/solicitar-revendedor', async (req, res) => {
 router.get('/mis-boletas', async (req, res) => {
   try {
     const { data, error } = await supabase.from('boletas').select('*, sorteos(nombre, estado, numero_ganador)').eq('usuario_id', req.usuario.id).order('created_at', { ascending: false })
-    if (error) return res.status(500).json({ error: 'Error al obtener boletas' })
+    if (error) return res.status(500).json({ error: error.message })
     res.json(data)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
 })
 
-// RESULTADOS PUBLICOS
+// RESULTADOS
 router.get('/resultados', async (req, res) => {
   try {
     const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'jugado').order('jugado_at', { ascending: false }).limit(1).single()
