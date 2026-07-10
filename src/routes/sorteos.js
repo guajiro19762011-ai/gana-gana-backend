@@ -181,6 +181,69 @@ router.get('/mis-boletas', async (req, res) => {
   }
 })
 
+// BOLETAS GRATIS pendientes del cliente
+router.get('/boleta-gratis', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('boletas_gratis')
+      .select('*')
+      .eq('usuario_id', req.usuario.id)
+      .eq('estado', 'pendiente')
+    if (error) return res.status(500).json({ error: error.message })
+    res.json(data || [])
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// RECLAMAR boleta gratis
+router.post('/reclamar-boleta-gratis', async (req, res) => {
+  const { boleta_gratis_id, boleta_id } = req.body
+  const usuario_id = req.usuario.id
+  if (!boleta_gratis_id || !boleta_id) return res.status(400).json({ error: 'Datos incompletos' })
+  try {
+    // Verificar que la boleta gratis existe y es del usuario
+    const { data: boletaGratis } = await supabase.from('boletas_gratis').select('*').eq('id', boleta_gratis_id).eq('usuario_id', usuario_id).eq('estado', 'pendiente').single()
+    if (!boletaGratis) return res.status(404).json({ error: 'Boleta gratis no encontrada o ya reclamada' })
+
+    const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'activo').single()
+    if (!sorteo) return res.status(404).json({ error: 'No hay sorteo activo' })
+
+    // Verificar boleta pre-generada disponible
+    const { data: boleta } = await supabase.from('boletas_pregeneradas').select('*').eq('id', boleta_id).single()
+    if (!boleta || !boleta.disponible) return res.status(400).json({ error: 'Esta boleta ya fue vendida' })
+
+    // Marcar boleta como vendida SIN costo y SIN bono
+    await supabase.from('boletas_pregeneradas').update({
+      disponible: false, usuario_id, vendida_at: new Date().toISOString()
+    }).eq('id', boleta_id)
+
+    // Registrar en boletas
+    const { data: boletaReg } = await supabase.from('boletas').insert([{
+      usuario_id, sorteo_id: sorteo.id, numeros: boleta.numeros, valor: 0
+    }]).select().single()
+
+    // Registrar números tomados
+    const numerosInsert = boleta.numeros.map(n => ({ sorteo_id: sorteo.id, numero: n, usuario_id, boleta_id: boletaReg?.id }))
+    await supabase.from('numeros_tomados').insert(numerosInsert)
+
+    // Marcar boleta gratis como reclamada
+    await supabase.from('boletas_gratis').update({ estado: 'reclamada', reclamada_at: new Date().toISOString() }).eq('id', boleta_gratis_id)
+
+    // Movimiento de $0
+    await supabase.from('movimientos').insert([{
+      usuario_id, tipo: 'boleta_gratis', monto: 0,
+      descripcion: `Boleta gratis reclamada por acierto 2 últimas cifras — Boleta #${boleta.numero_boleta}`
+    }])
+
+    await supabase.from('sorteos').update({ total_boletas: sorteo.total_boletas + 1 }).eq('id', sorteo.id)
+
+    res.json({ success: true, boleta: { ...boleta, id: boletaReg?.id, sorteos: sorteo } })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // RESULTADOS
 router.get('/resultados', async (req, res) => {
   try {

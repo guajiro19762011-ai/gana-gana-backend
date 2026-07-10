@@ -94,7 +94,7 @@ router.post('/recargas/:id/rechazar', async (req, res) => {
   }
 })
 
-// CALCULAR GANADORES
+// CALCULAR GANADORES con jerarquía de premios
 router.post('/sorteo/ganadores', async (req, res) => {
   const { numero } = req.body
   if (!/^\d{4}$/.test(numero)) return res.status(400).json({ error: 'Número inválido' })
@@ -104,23 +104,39 @@ router.post('/sorteo/ganadores', async (req, res) => {
     const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'activo').single()
     if (!sorteo) return res.status(404).json({ error: 'No hay sorteo activo' })
 
-    const { data: mayor } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', numero)
-    if (mayor && mayor.length > 0) mayor.forEach(m => ganadores.push({ numero, categoria: 'Premio Mayor', premio: 2000000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id }))
+    // Conjunto de usuarios que ya ganaron un premio mayor (no califican para 2 últimas)
+    const usuariosConPremioMayor = new Set()
 
+    // 1. PREMIO MAYOR — 4 cifras exactas
+    const { data: mayor } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', numero)
+    if (mayor && mayor.length > 0) mayor.forEach(m => {
+      ganadores.push({ numero, categoria: 'Premio Mayor', premio: 2000000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id })
+      usuariosConPremioMayor.add(m.usuarios?.id)
+    })
+
+    // 2. TRES PRIMERAS — 123X (excluye número ganador exacto)
     for (let x = 0; x <= 9; x++) {
       const n = d[0] + d[1] + d[2] + x
       if (n === numero) continue
       const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', n)
-      if (data && data.length > 0) data.forEach(m => ganadores.push({ numero: n, categoria: '3 Primeras', premio: 50000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id }))
+      if (data && data.length > 0) data.forEach(m => {
+        ganadores.push({ numero: n, categoria: '3 Primeras', premio: 50000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id })
+        usuariosConPremioMayor.add(m.usuarios?.id)
+      })
     }
 
+    // 3. TRES ÚLTIMAS — X234 (excluye número ganador exacto)
     for (let x = 0; x <= 9; x++) {
       const n = x + d[1] + d[2] + d[3]
       if (n === numero) continue
       const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', n)
-      if (data && data.length > 0) data.forEach(m => ganadores.push({ numero: n, categoria: '3 Últimas', premio: 50000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id }))
+      if (data && data.length > 0) data.forEach(m => {
+        ganadores.push({ numero: n, categoria: '3 Últimas', premio: 50000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id })
+        usuariosConPremioMayor.add(m.usuarios?.id)
+      })
     }
 
+    // 4. DOS ÚLTIMAS — XX34 (solo si NO ganó ningún premio mayor)
     const excluidos = new Set([numero])
     for (let x = 0; x <= 9; x++) excluidos.add(d[0] + d[1] + d[2] + x)
     for (let x = 0; x <= 9; x++) excluidos.add(x + d[1] + d[2] + d[3])
@@ -130,7 +146,12 @@ router.post('/sorteo/ganadores', async (req, res) => {
         const n = String(a) + String(b) + d[2] + d[3]
         if (excluidos.has(n)) continue
         const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', n)
-        if (data && data.length > 0) data.forEach(m => ganadores.push({ numero: n, categoria: '2 Últimas', premio: 5000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id }))
+        if (data && data.length > 0) data.forEach(m => {
+          // Solo si no ganó premio mayor
+          if (!usuariosConPremioMayor.has(m.usuarios?.id)) {
+            ganadores.push({ numero: n, categoria: '2 Últimas', premio: 0, esBoleta: true, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id })
+          }
+        })
       }
     }
 
@@ -349,6 +370,22 @@ router.put('/credenciales', async (req, res) => {
     if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No hay cambios que guardar' })
     await supabase.from('usuarios').update(updates).eq('id', req.usuario.id)
     res.json({ success: true, mensaje: 'Credenciales actualizadas correctamente' })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// OTORGAR BOLETA GRATIS (2 últimas cifras)
+router.post('/sorteo/otorgar-boleta-gratis', async (req, res) => {
+  const { usuario_id, numero } = req.body
+  if (!usuario_id || !numero) return res.status(400).json({ error: 'Datos incompletos' })
+  try {
+    const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'activo').single()
+    if (!sorteo) return res.status(404).json({ error: 'No hay sorteo activo' })
+    await supabase.from('boletas_gratis').insert([{
+      usuario_id, sorteo_id: sorteo.id, numero_ganador: numero, estado: 'pendiente'
+    }])
+    res.json({ success: true, mensaje: 'Boleta gratis otorgada al usuario' })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
