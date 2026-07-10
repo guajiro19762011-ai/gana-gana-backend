@@ -77,11 +77,7 @@ router.post('/recargas/:id/aprobar', async (req, res) => {
     const { data: usuario } = await supabase.from('usuarios').select('saldo, nombre, celular').eq('id', recarga.usuario_id).single()
     await supabase.from('usuarios').update({ saldo: (usuario.saldo || 0) + recarga.monto }).eq('id', recarga.usuario_id)
     await supabase.from('movimientos').insert([{ usuario_id: recarga.usuario_id, tipo: 'recarga', monto: recarga.monto, descripcion: 'Recarga aprobada por admin via ' + recarga.metodo, referencia_id: String(id) }])
-
-    // Notificar por WhatsApp
-    await enviarWhatsApp(usuario.celular,
-      `🎟️ *GANA GANA O GANA*\n\n¡Hola ${usuario.nombre}! ✅\n\nTu recarga de *$${recarga.monto.toLocaleString('es-CO')} COP* ha sido aprobada y ya está disponible en tu billetera.\n\n¡Compra tu boleta y participa! 🍀`
-    )
+    await enviarWhatsApp(usuario.celular, `🎟️ *GANA GANA O GANA*\n\n¡Hola ${usuario.nombre}! ✅\n\nTu recarga de *$${recarga.monto.toLocaleString('es-CO')} COP* ha sido aprobada.\n\n¡Compra tu boleta y participa! 🍀`)
     res.json({ success: true })
   } catch (err) {
     res.status(500).json({ error: 'Error al aprobar recarga' })
@@ -115,14 +111,14 @@ router.post('/sorteo/ganadores', async (req, res) => {
       const n = d[0] + d[1] + d[2] + x
       if (n === numero) continue
       const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', n)
-      if (data && data.length > 0) data.forEach(m => ganadores.push({ numero: n, categoria: '3 Primeras', premio: 80000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id }))
+      if (data && data.length > 0) data.forEach(m => ganadores.push({ numero: n, categoria: '3 Primeras', premio: 50000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id }))
     }
 
     for (let x = 0; x <= 9; x++) {
       const n = x + d[1] + d[2] + d[3]
       if (n === numero) continue
       const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', n)
-      if (data && data.length > 0) data.forEach(m => ganadores.push({ numero: n, categoria: '3 Últimas', premio: 80000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id }))
+      if (data && data.length > 0) data.forEach(m => ganadores.push({ numero: n, categoria: '3 Últimas', premio: 50000, nombre: m.usuarios?.nombre, email: m.usuarios?.email, celular: m.usuarios?.celular, usuario_id: m.usuarios?.id }))
     }
 
     const excluidos = new Set([numero])
@@ -144,7 +140,7 @@ router.post('/sorteo/ganadores', async (req, res) => {
   }
 })
 
-// PAGAR PREMIO + NOTIFICAR POR WHATSAPP
+// PAGAR PREMIO
 router.post('/sorteo/pagar-premio', async (req, res) => {
   const { usuario_id, premio, categoria, numero, celular } = req.body
   if (!usuario_id || !premio || !categoria) return res.status(400).json({ error: 'Datos incompletos' })
@@ -152,26 +148,19 @@ router.post('/sorteo/pagar-premio', async (req, res) => {
     const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'activo').single()
     const { data: usuario } = await supabase.from('usuarios').select('saldo, nombre, celular').eq('id', usuario_id).single()
     if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado' })
-
     await supabase.from('usuarios').update({ saldo: (usuario.saldo || 0) + premio }).eq('id', usuario_id)
     await supabase.from('movimientos').insert([{ usuario_id, tipo: 'premio', monto: premio, descripcion: `Premio ${categoria} - número ${numero}`, referencia_id: numero }])
-
     if (sorteo) {
       await supabase.from('ganadores').insert([{ sorteo_id: sorteo.id, usuario_id, numero, categoria, premio, boleta_id: 1 }])
       await supabase.from('sorteos').update({ premios_pagados: (sorteo.premios_pagados || 0) + premio }).eq('id', sorteo.id)
     }
-
-    // Mensaje según categoría
     const mensajes = {
-      'Premio Mayor': `🏆 *¡GANASTE EL PREMIO MAYOR!* 🏆\n\n¡Felicitaciones ${usuario.nombre}! 🎉\n\nTu número *${numero}* ganó el *Premio Mayor* del sorteo.\n\n💰 *$${premio.toLocaleString('es-CO')} COP* han sido acreditados a tu billetera en GANA GANA O GANA.\n\n¡Muchas gracias por participar! 🍀`,
-      '3 Primeras': `🥈 *¡GANASTE UN PREMIO!* 🥈\n\n¡Felicitaciones ${usuario.nombre}! 🎉\n\nTu número *${numero}* ganó el premio de *3 primeras cifras*.\n\n💰 *$${premio.toLocaleString('es-CO')} COP* han sido acreditados a tu billetera.\n\n¡Sigue participando! 🍀`,
-      '3 Últimas': `🥉 *¡GANASTE UN PREMIO!* 🥉\n\n¡Felicitaciones ${usuario.nombre}! 🎉\n\nTu número *${numero}* ganó el premio de *3 últimas cifras*.\n\n💰 *$${premio.toLocaleString('es-CO')} COP* han sido acreditados a tu billetera.\n\n¡Sigue participando! 🍀`,
-      '2 Últimas': `🎁 *¡GANASTE UNA BOLETA GRATIS!* 🎁\n\n¡Felicitaciones ${usuario.nombre}! 🎉\n\nTu número *${numero}* coincidió con las *2 últimas cifras*.\n\n¡Tu boleta gratis ha sido acreditada a tu billetera! 🍀`,
+      'Premio Mayor': `🏆 *¡GANASTE EL PREMIO MAYOR!* 🏆\n\n¡Felicitaciones ${usuario.nombre}! 🎉\n\n💰 *$${premio.toLocaleString('es-CO')} COP* acreditados a tu billetera. 🍀`,
+      '3 Primeras': `🥈 *¡GANASTE UN PREMIO!*\n\n¡Felicitaciones ${usuario.nombre}! 🎉\n\n💰 *$${premio.toLocaleString('es-CO')} COP* acreditados. 🍀`,
+      '3 Últimas': `🥉 *¡GANASTE UN PREMIO!*\n\n¡Felicitaciones ${usuario.nombre}! 🎉\n\n💰 *$${premio.toLocaleString('es-CO')} COP* acreditados. 🍀`,
+      '2 Últimas': `🎁 *¡GANASTE UNA BOLETA GRATIS!*\n\n¡Felicitaciones ${usuario.nombre}! 🎉 🍀`,
     }
-
-    const celularFinal = celular || usuario.celular
-    await enviarWhatsApp(celularFinal, mensajes[categoria] || `🎉 ¡Ganaste $${premio.toLocaleString('es-CO')} COP! Ya está en tu billetera.`)
-
+    await enviarWhatsApp(celular || usuario.celular, mensajes[categoria] || `🎉 ¡Ganaste $${premio.toLocaleString('es-CO')} COP!`)
     res.json({ success: true })
   } catch (err) {
     res.status(500).json({ error: 'Error al pagar premio' })
@@ -185,22 +174,34 @@ router.post('/sorteo/cerrar', async (req, res) => {
   try {
     const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'activo').single()
     if (!sorteo) return res.status(404).json({ error: 'No hay sorteo activo' })
-
-    const recaudo = sorteo.recaudo_actual || (sorteo.total_boletas * 5000)
+    const recaudo = sorteo.total_boletas * 5000
     const premios = sorteo.premios_pagados || 0
     const utilidad = recaudo - premios
-
     await supabase.from('sorteos').update({ estado: 'jugado', numero_ganador, jugado_at: new Date().toISOString(), saldo_acumulado: utilidad }).eq('id', sorteo.id)
-
     const { data: anteriores } = await supabase.from('sorteos').select('saldo_acumulado').eq('estado', 'jugado')
     const saldoTotal = anteriores?.reduce((acc, s) => acc + (s.saldo_acumulado || 0), 0) || 0
-
     const nuevoNumero = sorteo.id + 1
     const { data: nuevoSorteo } = await supabase.from('sorteos').insert([{ nombre: `Sorteo #${String(nuevoNumero).padStart(4,'0')}`, estado: 'activo', total_boletas: 0, recaudo_actual: 0, premios_pagados: 0 }]).select().single()
-
     res.json({ success: true, utilidad, saldo_total: saldoTotal, nuevo_sorteo: nuevoSorteo })
   } catch (err) {
     res.status(500).json({ error: 'Error al cerrar sorteo: ' + err.message })
+  }
+})
+
+// GENERAR BOLETAS
+router.post('/sorteo/generar-boletas', async (req, res) => {
+  const { sorteo_id } = req.body
+  if (!sorteo_id) return res.status(400).json({ error: 'sorteo_id requerido' })
+  try {
+    const generarBoletas = require('../utils/generarBoletas')
+    const boletas = generarBoletas()
+    for (let i = 0; i < boletas.length; i += 100) {
+      const lote = boletas.slice(i, i + 100).map(b => ({ sorteo_id, numero_boleta: b.numero_boleta, numeros: b.numeros }))
+      await supabase.from('boletas_pregeneradas').insert(lote)
+    }
+    res.json({ success: true, total: boletas.length })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
   }
 })
 
@@ -252,10 +253,7 @@ router.post('/usuarios/:id/recargar', async (req, res) => {
     if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado' })
     await supabase.from('usuarios').update({ saldo: (usuario.saldo || 0) + monto }).eq('id', req.params.id)
     await supabase.from('movimientos').insert([{ usuario_id: req.params.id, tipo: 'recarga_admin', monto, descripcion: descripcion || 'Recarga manual por administrador' }])
-
-    await enviarWhatsApp(usuario.celular,
-      `🎟️ *GANA GANA O GANA*\n\n¡Hola ${usuario.nombre}! ✅\n\nEl administrador ha recargado *$${monto.toLocaleString('es-CO')} COP* a tu billetera.\n\n¡Ya puedes comprar tu boleta! 🍀`
-    )
+    await enviarWhatsApp(usuario.celular, `🎟️ *GANA GANA O GANA*\n\n¡Hola ${usuario.nombre}! ✅\n\nEl administrador recargó *$${monto.toLocaleString('es-CO')} COP* a tu billetera. 🍀`)
     res.json({ success: true })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -273,16 +271,10 @@ router.get('/usuarios/:id/boletas', async (req, res) => {
   }
 })
 
-module.exports = router
-
 // SOLICITUDES DE REVENDEDOR
 router.get('/revendedores/solicitudes', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('usuarios')
-      .select('id, nombre, email, celular, codigo_referido, saldo, created_at')
-      .eq('solicitud_revendedor', 'pendiente')
-      .order('created_at', { ascending: false })
+    const { data, error } = await supabase.from('usuarios').select('id, nombre, email, celular, codigo_referido, saldo, created_at').eq('solicitud_revendedor', 'pendiente').order('created_at', { ascending: false })
     if (error) return res.status(500).json({ error: error.message })
     res.json(data || [])
   } catch (err) {
@@ -310,38 +302,25 @@ router.post('/revendedores/:id/rechazar', async (req, res) => {
   }
 })
 
-// REINICIAR SISTEMA (borrar todo excepto admin)
+// REINICIAR SISTEMA
 router.post('/reiniciar', async (req, res) => {
   const { confirmacion } = req.body
   if (confirmacion !== 'REINICIAR') return res.status(400).json({ error: 'Debes confirmar escribiendo REINICIAR' })
   try {
-    // Borrar en orden por dependencias
     await supabase.from('ganadores').delete().neq('id', 0)
     await supabase.from('movimientos').delete().neq('id', 0)
     await supabase.from('numeros_tomados').delete().neq('id', 0)
+    await supabase.from('boletas_pregeneradas').delete().neq('id', 0)
     await supabase.from('boletas').delete().neq('id', 0)
     await supabase.from('recargas').delete().neq('id', 0)
     await supabase.from('retiros').delete().neq('id', 0)
     await supabase.from('mensajes').delete().neq('id', 0)
     await supabase.from('anuncios').delete().neq('id', 0)
     await supabase.from('sorteos').delete().neq('id', 0)
-
-    // Borrar todos los usuarios excepto admin
     await supabase.from('usuarios').delete().neq('rol', 'admin')
-
-    // Resetear saldo del admin a 0
     await supabase.from('usuarios').update({ saldo: 0 }).eq('rol', 'admin')
-
-    // Crear nuevo sorteo limpio
-    await supabase.from('sorteos').insert([{
-      nombre: 'Sorteo #0001',
-      estado: 'activo',
-      total_boletas: 0,
-      recaudo_actual: 0,
-      premios_pagados: 0
-    }])
-
-    res.json({ success: true, mensaje: 'Sistema reiniciado exitosamente' })
+    const { data: nuevoSorteo } = await supabase.from('sorteos').insert([{ nombre: 'Sorteo #0001', estado: 'activo', total_boletas: 0, recaudo_actual: 0, premios_pagados: 0 }]).select().single()
+    res.json({ success: true, mensaje: 'Sistema reiniciado exitosamente', sorteo_id: nuevoSorteo?.id })
   } catch (err) {
     res.status(500).json({ error: 'Error al reiniciar: ' + err.message })
   }
@@ -352,42 +331,27 @@ router.put('/credenciales', async (req, res) => {
   const { email, password_actual, password_nuevo, confirmar } = req.body
   try {
     const bcrypt = require('bcryptjs')
-
-    // Obtener admin actual
-    const { data: admin } = await supabase
-      .from('usuarios')
-      .select('*')
-      .eq('id', req.usuario.id)
-      .single()
-
+    const { data: admin } = await supabase.from('usuarios').select('*').eq('id', req.usuario.id).single()
     if (!admin) return res.status(404).json({ error: 'Admin no encontrado' })
-
-    // Verificar contraseña actual
     const valido = await bcrypt.compare(password_actual, admin.password_hash)
     if (!valido) return res.status(400).json({ error: 'La contraseña actual es incorrecta' })
-
     const updates = {}
-
-    // Actualizar email si cambió
     if (email && email !== admin.email) {
       const { data: existe } = await supabase.from('usuarios').select('id').eq('email', email).single()
       if (existe) return res.status(400).json({ error: 'Ese correo ya está en uso' })
       updates.email = email
     }
-
-    // Actualizar contraseña si se proporcionó
     if (password_nuevo) {
-      if (password_nuevo.length < 6) return res.status(400).json({ error: 'La nueva contraseña debe tener mínimo 6 caracteres' })
+      if (password_nuevo.length < 6) return res.status(400).json({ error: 'Mínimo 6 caracteres' })
       if (password_nuevo !== confirmar) return res.status(400).json({ error: 'Las contraseñas no coinciden' })
       updates.password_hash = await bcrypt.hash(password_nuevo, 10)
     }
-
-    if (Object.keys(updates).length === 0)
-      return res.status(400).json({ error: 'No hay cambios que guardar' })
-
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No hay cambios que guardar' })
     await supabase.from('usuarios').update(updates).eq('id', req.usuario.id)
     res.json({ success: true, mensaje: 'Credenciales actualizadas correctamente' })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
 })
+
+module.exports = router
