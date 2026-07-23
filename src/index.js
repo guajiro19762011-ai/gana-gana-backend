@@ -17,6 +17,8 @@ app.use(express.json())
 
 app.use('/api/auth', authRoutes)
 app.use('/api/admin', adminRoutes)
+const sorteosPublico = require('./routes/sorteos').publico
+app.use('/api/sorteos', sorteosPublico)
 app.use('/api/sorteos', sorteosRoutes)
 app.use('/api/billetera', billeteraRoutes)
 app.use('/api/anuncios', anunciosRoutes)

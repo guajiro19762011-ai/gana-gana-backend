@@ -188,22 +188,104 @@ router.post('/sorteo/pagar-premio', async (req, res) => {
   }
 })
 
-// CERRAR SORTEO E INICIAR NUEVO
+// CERRAR SORTEO E INICIAR NUEVO — calcula y guarda ganadores automáticamente
 router.post('/sorteo/cerrar', async (req, res) => {
   const { numero_ganador } = req.body
   if (!numero_ganador) return res.status(400).json({ error: 'Número ganador requerido' })
   try {
     const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'activo').single()
     if (!sorteo) return res.status(404).json({ error: 'No hay sorteo activo' })
+
+    const d = numero_ganador.split('')
+    const ganadores = []
+    const usuariosConPremioMayor = new Set()
+
+    // 1. PREMIO MAYOR
+    const { data: mayor } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', numero_ganador)
+    if (mayor && mayor.length > 0) mayor.forEach(m => {
+      ganadores.push({ sorteo_id: sorteo.id, usuario_id: m.usuarios?.id, numero: numero_ganador, categoria: 'Premio Mayor', premio: 2000000 })
+      usuariosConPremioMayor.add(m.usuarios?.id)
+    })
+
+    // 2. TRES PRIMERAS
+    for (let x = 0; x <= 9; x++) {
+      const n = d[0] + d[1] + d[2] + x
+      if (n === numero_ganador) continue
+      const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', n)
+      if (data && data.length > 0) data.forEach(m => {
+        ganadores.push({ sorteo_id: sorteo.id, usuario_id: m.usuarios?.id, numero: n, categoria: '3 Primeras', premio: 50000 })
+        usuariosConPremioMayor.add(m.usuarios?.id)
+      })
+    }
+
+    // 3. TRES ÚLTIMAS
+    for (let x = 0; x <= 9; x++) {
+      const n = x + d[1] + d[2] + d[3]
+      if (n === numero_ganador) continue
+      const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', n)
+      if (data && data.length > 0) data.forEach(m => {
+        ganadores.push({ sorteo_id: sorteo.id, usuario_id: m.usuarios?.id, numero: n, categoria: '3 Últimas', premio: 50000 })
+        usuariosConPremioMayor.add(m.usuarios?.id)
+      })
+    }
+
+    // 4. DOS ÚLTIMAS — solo quien NO ganó premio mayor
+    const excluidos = new Set([numero_ganador])
+    for (let x = 0; x <= 9; x++) excluidos.add(d[0] + d[1] + d[2] + x)
+    for (let x = 0; x <= 9; x++) excluidos.add(x + d[1] + d[2] + d[3])
+    for (let a = 0; a <= 9; a++) {
+      for (let b = 0; b <= 9; b++) {
+        const n = String(a) + String(b) + d[2] + d[3]
+        if (excluidos.has(n)) continue
+        const { data } = await supabase.from('numeros_tomados').select('*, usuarios(id, nombre, email, celular)').eq('sorteo_id', sorteo.id).eq('numero', n)
+        if (data && data.length > 0) data.forEach(m => {
+          if (!usuariosConPremioMayor.has(m.usuarios?.id)) {
+            ganadores.push({ sorteo_id: sorteo.id, usuario_id: m.usuarios?.id, numero: n, categoria: '2 Últimas', premio: 0 })
+          }
+        })
+      }
+    }
+
+    // Guardar todos los ganadores
+    if (ganadores.length > 0) {
+      await supabase.from('ganadores').insert(ganadores)
+    }
+
+    // Guardar boletas gratis para ganadores de 2 últimas
+    const boletasGratis = ganadores.filter(g => g.categoria === '2 Últimas').map(g => ({
+      usuario_id: g.usuario_id, sorteo_id: sorteo.id, numero_ganador: g.numero, estado: 'pendiente'
+    }))
+    if (boletasGratis.length > 0) {
+      await supabase.from('boletas_gratis').insert(boletasGratis)
+    }
+
+    // Pagar premios en efectivo automáticamente
+    const premiosEfectivo = ganadores.filter(g => g.premio > 0)
+    let totalPremios = 0
+    for (const g of premiosEfectivo) {
+      const { data: usuario } = await supabase.from('usuarios').select('saldo').eq('id', g.usuario_id).single()
+      if (usuario) {
+        await supabase.from('usuarios').update({ saldo: (usuario.saldo || 0) + g.premio }).eq('id', g.usuario_id)
+        await supabase.from('movimientos').insert([{ usuario_id: g.usuario_id, tipo: 'premio', monto: g.premio, descripcion: `Premio ${g.categoria} sorteo ${sorteo.nombre} - número ${g.numero}` }])
+        totalPremios += g.premio
+      }
+    }
+
+    // Cerrar sorteo
     const recaudo = sorteo.total_boletas * 5000
-    const premios = sorteo.premios_pagados || 0
-    const utilidad = recaudo - premios
-    await supabase.from('sorteos').update({ estado: 'jugado', numero_ganador, jugado_at: new Date().toISOString(), saldo_acumulado: utilidad }).eq('id', sorteo.id)
+    const utilidad = recaudo - totalPremios
+    await supabase.from('sorteos').update({ estado: 'jugado', numero_ganador, jugado_at: new Date().toISOString(), saldo_acumulado: utilidad, premios_pagados: totalPremios }).eq('id', sorteo.id)
+
     const { data: anteriores } = await supabase.from('sorteos').select('saldo_acumulado').eq('estado', 'jugado')
     const saldoTotal = anteriores?.reduce((acc, s) => acc + (s.saldo_acumulado || 0), 0) || 0
+
     const nuevoNumero = sorteo.id + 1
     const { data: nuevoSorteo } = await supabase.from('sorteos').insert([{ nombre: `Sorteo #${String(nuevoNumero).padStart(4,'0')}`, estado: 'activo', total_boletas: 0, recaudo_actual: 0, premios_pagados: 0 }]).select().single()
-    res.json({ success: true, utilidad, saldo_total: saldoTotal, nuevo_sorteo: nuevoSorteo })
+
+    res.json({ 
+      success: true, utilidad, saldo_total: saldoTotal, nuevo_sorteo: nuevoSorteo,
+      resumen: { total_ganadores: ganadores.length, premios_pagados: totalPremios, boletas_gratis: boletasGratis.length }
+    })
   } catch (err) {
     res.status(500).json({ error: 'Error al cerrar sorteo: ' + err.message })
   }

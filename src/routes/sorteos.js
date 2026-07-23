@@ -4,6 +4,58 @@ const supabase = require('../db/supabase')
 const { verificarToken } = require('../middleware/authMiddleware')
 const generarBoletas = require('../utils/generarBoletas')
 
+// RUTAS PÚBLICAS (sin autenticación)
+const routerPublico = require('express').Router()
+
+// HISTORIAL PÚBLICO de sorteos jugados
+routerPublico.get('/historial-publico', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('sorteos')
+      .select('id, nombre, numero_ganador, jugado_at, total_boletas, premios_pagados')
+      .eq('estado', 'jugado')
+      .order('jugado_at', { ascending: false })
+    if (error) return res.status(500).json({ error: error.message })
+    res.json(data || [])
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// GANADORES DE UN SORTEO ESPECÍFICO (público)
+routerPublico.get('/ganadores-sorteo/:id', async (req, res) => {
+  try {
+    const { data: ganadores, error } = await supabase
+      .from('ganadores')
+      .select('*, usuarios(nombre)')
+      .eq('sorteo_id', req.params.id)
+      .order('premio', { ascending: false })
+    if (error) return res.status(500).json({ error: error.message })
+
+    // Incluir ganadores de boleta gratis
+    const { data: boletasGratis } = await supabase
+      .from('boletas_gratis')
+      .select('*, usuarios(nombre)')
+      .eq('sorteo_id', req.params.id)
+
+    const todos = [
+      ...(ganadores || []),
+      ...(boletasGratis || []).map(bg => ({
+        numero: bg.numero_ganador,
+        categoria: '2 Últimas',
+        premio: 0,
+        usuarios: bg.usuarios
+      }))
+    ]
+
+    res.json(todos)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+module.exports.publico = routerPublico
+
 router.use(verificarToken)
 
 // GET sorteo activo
@@ -247,11 +299,47 @@ router.post('/reclamar-boleta-gratis', async (req, res) => {
 // RESULTADOS
 router.get('/resultados', async (req, res) => {
   try {
-    const { data: sorteo } = await supabase.from('sorteos').select('*').eq('estado', 'jugado').order('jugado_at', { ascending: false }).limit(1).single()
+    const { data: sorteos } = await supabase
+      .from('sorteos')
+      .select('*')
+      .eq('estado', 'jugado')
+      .order('jugado_at', { ascending: false })
+      .limit(1)
+
+    const sorteo = sorteos?.[0] || null
     if (!sorteo || !sorteo.numero_ganador) return res.json({ sorteo: null, ganadores: [] })
-    const { data: ganadores } = await supabase.from('ganadores').select('*, usuarios(nombre)').eq('sorteo_id', sorteo.id).order('premio', { ascending: false })
-    res.json({ sorteo, ganadores: (ganadores || []).map(g => ({ nombre: g.usuarios?.nombre, numero: g.numero, categoria: g.categoria, premio: g.premio })) })
+
+    const { data: ganadores } = await supabase
+      .from('ganadores')
+      .select('*, usuarios(nombre)')
+      .eq('sorteo_id', sorteo.id)
+      .order('premio', { ascending: false })
+
+    // Incluir ganadores de boleta gratis (2 últimas)
+    const { data: boletasGratis } = await supabase
+      .from('boletas_gratis')
+      .select('*, usuarios(nombre)')
+      .eq('sorteo_id', sorteo.id)
+
+    const ganadoresFinal = [
+      ...(ganadores || []).map(g => ({
+        nombre: g.usuarios?.nombre,
+        numero: g.numero,
+        categoria: g.categoria,
+        premio: g.premio
+      })),
+      ...(boletasGratis || []).map(bg => ({
+        nombre: bg.usuarios?.nombre,
+        numero: bg.numero_ganador,
+        categoria: '2 Últimas',
+        premio: 0,
+        esBoleta: true
+      }))
+    ]
+
+    res.json({ sorteo, ganadores: ganadoresFinal })
   } catch (err) {
+    console.error('Error resultados:', err)
     res.json({ sorteo: null, ganadores: [] })
   }
 })
